@@ -1,11 +1,11 @@
 """
 Admin Notify Bot - Telethon Userbot (Railway)
-Theo dõi group Telegram và forward tin nhắn của admin sang Saved Messages
+Theo dõi group Telegram và forward tin nhắn của CHANNEL (không phải member thường)
 """
 
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.tl.types import ChannelParticipantsAdmins
+from telethon.tl.types import Channel, Chat
 import asyncio
 import logging
 import os
@@ -17,9 +17,8 @@ import os
 API_ID       = int(os.environ["API_ID"])
 API_HASH     = os.environ["API_HASH"]
 SESSION      = os.environ["SESSION_STRING"]   # Lấy bằng gen_session.py
-TARGET_GROUP      = os.environ["TARGET_GROUP"]      # username hoặc group ID (số)
-FORWARD_TO        = os.environ.get("FORWARD_TO", "me")
-LINKED_CHANNEL_ID = int(os.environ.get("LINKED_CHANNEL_ID", "0"))  # Channel liên kết với group (nếu có)
+TARGET_GROUP = os.environ["TARGET_GROUP"]     # username hoặc group ID (số)
+FORWARD_TO   = os.environ.get("FORWARD_TO", "me")
 
 # ============================================================
 
@@ -32,54 +31,23 @@ log = logging.getLogger(__name__)
 
 client = TelegramClient(StringSession(SESSION), API_ID, API_HASH)
 
-admin_ids: set = set()
-target_group_id: int = None
-linked_channel_id: int = None
-
-
-async def refresh_admins():
-    """Lấy danh sách admin của group"""
-    global admin_ids
-    try:
-        admins = await client.get_participants(target_group_id, filter=ChannelParticipantsAdmins())
-        admin_ids = {a.id for a in admins}
-        log.info(f"✅ Đã tải {len(admin_ids)} admin")
-    except Exception as e:
-        log.error(f"❌ Không lấy được danh sách admin: {e}")
-
-
-async def auto_refresh_admins(interval_minutes=30):
-    while True:
-        await asyncio.sleep(interval_minutes * 60)
-        await refresh_admins()
+target_group_id: int | None = None
 
 
 async def on_new_message(event):
-    chat_id = event.chat_id
-    sender_id = event.sender_id
+    if event.chat_id != target_group_id:
+        return
 
-    # Tin nhắn từ channel liên kết → forward hết (đây là bài đăng chính thức của admin)
-    if linked_channel_id and chat_id == linked_channel_id:
-        pass  # cho qua, xử lý bên dưới
-    elif chat_id == target_group_id:
-        # Tin nhắn trong group → chỉ forward nếu sender là admin
-        if sender_id is None or sender_id not in admin_ids:
-            return
-    else:
+    # Chỉ lấy tin nhắn được gửi bởi Channel (bài đăng chính thức)
+    # Bỏ qua tin nhắn của member thường (User)
+    sender = await event.get_sender()
+    if not isinstance(sender, (Channel, Chat)):
         return
 
     try:
-        sender = await event.get_sender()
-        if sender:
-            name = getattr(sender, "first_name", "") or getattr(sender, "title", "Admin")
-            username = f"@{sender.username}" if getattr(sender, "username", None) else ""
-        else:
-            name = "Admin"
-            username = ""
-
-        chat = await event.get_chat()
-        group_title = getattr(chat, "title", "Group")
-        header = f"🔔 **[Admin {name} {username}]**\n📢 **{group_title}**\n{'─'*28}\n"
+        name = getattr(sender, "title", "Channel")
+        username = f"@{sender.username}" if getattr(sender, "username", None) else ""
+        header = f"📢 **{name}** {username}\n{'─'*28}\n"
         text = event.message.message or ""
 
         if event.message.media:
@@ -87,15 +55,16 @@ async def on_new_message(event):
             if text:
                 await client.send_message(FORWARD_TO, header + text)
         else:
-            await client.send_message(FORWARD_TO, header + text)
+            if text:
+                await client.send_message(FORWARD_TO, header + text)
 
-        log.info(f"📨 Forwarded from {name} ({sender_id}) | chat_id={chat_id}")
+        log.info(f"📨 Forwarded from channel: {name} | sender_id={sender.id}")
     except Exception as e:
         log.error(f"❌ Lỗi: {e}")
 
 
 async def main():
-    global target_group_id, linked_channel_id
+    global target_group_id
 
     log.info("🚀 Khởi động Admin Notify Bot...")
     await client.start()
@@ -110,32 +79,9 @@ async def main():
     target_group_id = entity.id
     log.info(f"✅ Group: {entity.title} (ID: {target_group_id})")
 
-    await refresh_admins()
+    client.add_event_handler(on_new_message, events.NewMessage(chats=target_group_id))
 
-    # Xác định channel liên kết
-    chats_to_watch = [target_group_id]
-    if LINKED_CHANNEL_ID:
-        linked_channel_id = LINKED_CHANNEL_ID
-        chats_to_watch.append(linked_channel_id)
-        log.info(f"🔗 Theo dõi thêm linked channel: {linked_channel_id}")
-    else:
-        # Tự động phát hiện linked channel từ full_chat
-        try:
-            from telethon.tl.functions.channels import GetFullChannelRequest
-            full = await client(GetFullChannelRequest(entity))
-            lc = getattr(full.full_chat, "linked_chat_id", None)
-            if lc:
-                linked_channel_id = lc
-                chats_to_watch.append(linked_channel_id)
-                log.info(f"🔗 Tự động phát hiện linked channel: {linked_channel_id}")
-        except Exception as e:
-            log.warning(f"⚠️ Không phát hiện được linked channel: {e}")
-
-    client.add_event_handler(on_new_message, events.NewMessage(chats=chats_to_watch))
-
-    asyncio.create_task(auto_refresh_admins(30))
-
-    log.info(f"👀 Đang theo dõi {chats_to_watch}... Forward sang: {FORWARD_TO}")
+    log.info(f"👀 Đang theo dõi... Chỉ forward tin nhắn từ Channel → {FORWARD_TO}")
     await client.run_until_disconnected()
 
 
